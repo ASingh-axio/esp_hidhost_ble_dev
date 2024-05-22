@@ -28,6 +28,28 @@
 #include "esp_hid_gap.h"
 #include "../include/hid_usage_keyboard.h"
 
+
+//mod by A open
+typedef struct {
+    uint8_t key_code;
+    uint8_t counter;
+    bool initial_delay_passed;
+} key_state_t;
+
+#define MAX_KEYS 6
+static key_state_t key_states[MAX_KEYS] = {0};
+static uint8_t num_keys = 0;
+typedef struct {
+    enum key_state {
+        KEY_STATE_PRESSED = 0x00,
+        KEY_STATE_RELEASED = 0x01
+    } state;
+    uint8_t modifier;
+    uint8_t key_code;
+} key_event_t;
+
+//mod by A close
+
 #define KEYBOARD_ENTER_MAIN_CHAR    '\r'
 
 const uint8_t keycode2ascii [113][2] = {
@@ -149,6 +171,123 @@ const uint8_t keycode2ascii [113][2] = {
 
 static const char *TAG = "ESP_HIDH_DEMO";
 
+
+/**
+ * @brief Key buffer scan code search.
+ *
+ * @param[in] src       Pointer to source buffer where to search
+ * @param[in] key       Key scancode to search
+ * @param[in] length    Size of the source buffer
+ */
+static inline bool key_found(const uint8_t *const src,
+                             uint8_t key,
+                             unsigned int length)
+{
+    for (unsigned int i = 0; i < length; i++) {
+        if (src[i] == key) {
+            return true;
+        }
+    }
+    return false;
+}
+
+
+
+/**
+ * @brief HID Keyboard modifier verification for capitalization application (right or left shift)
+ *
+ * @param[in] modifier
+ * @return true  Modifier was pressed (left or right shift)
+ * @return false Modifier was not pressed (left or right shift)
+ *
+ */
+static inline bool hid_keyboard_is_modifier_shift(uint8_t modifier)
+{
+    if ((modifier && HID_LEFT_SHIFT) ||
+            (modifier && HID_RIGHT_SHIFT)) {
+        return true;
+    }
+    return false;
+}
+
+
+/**
+ * @brief HID Keyboard print char symbol
+ *
+ * @param[in] key_char  Keyboard char to stdout
+ */
+static inline void hid_keyboard_print_char(unsigned int key_char)
+{
+    if (!!key_char) {
+        //edited code
+        switch (key_char) {
+            default:
+                putchar(key_char); 
+        }
+        //putchar(key_char);
+#if (KEYBOARD_ENTER_LF_EXTEND)
+        if (KEYBOARD_ENTER_MAIN_CHAR == key_char) {
+            putchar('\n');
+        }
+#endif // KEYBOARD_ENTER_LF_EXTEND
+        fflush(stdout);
+    }
+}
+
+
+/**
+ * @brief HID Keyboard get char symbol from key code
+ *
+ * @param[in] modifier  Keyboard modifier data
+ * @param[in] key_code  Keyboard key code
+ * @param[in] key_char  Pointer to key char data
+ *
+ * @return true  Key scancode converted successfully
+ * @return false Key scancode unknown
+ */
+static inline bool hid_keyboard_get_char(uint8_t modifier,
+        uint8_t key_code,
+        unsigned char *key_char)
+{
+    uint8_t mod = (hid_keyboard_is_modifier_shift(modifier)) ? 1 : 0;
+
+    if ((key_code >= HID_KEY_A) && (key_code <= HID_KEY_F21)) {       //modified by as
+        *key_char = keycode2ascii[key_code][mod];
+    } else {
+        // All other key pressed
+
+        return false;
+    }
+
+    return true;
+}
+
+
+
+/**
+ * @brief Key Event. Key event with the key code, state and modifier.
+ *
+ * @param[in] key_event Pointer to Key Event structure
+ *
+ */
+static void key_event_callback(key_event_t *key_event)
+{
+    unsigned char key_char;
+
+   // hid_print_new_device_report_header(HID_PROTOCOL_KEYBOARD);
+
+    if (KEY_STATE_PRESSED == key_event->state) {
+        if (hid_keyboard_get_char(key_event->modifier,
+                                  key_event->key_code, &key_char)) {
+
+            hid_keyboard_print_char(key_char);
+
+        }
+    }
+}
+
+
+
 void hidh_callback(void *handler_args, esp_event_base_t base, int32_t id, void *event_data)
 {
     esp_hidh_event_t event = (esp_hidh_event_t)id;
@@ -172,10 +311,43 @@ void hidh_callback(void *handler_args, esp_event_base_t base, int32_t id, void *
     }
     case ESP_HIDH_INPUT_EVENT: {
         const uint8_t *bda = esp_hidh_dev_bda_get(param->input.dev);
+        static uint8_t prev_keys[HID_KEYBOARD_KEY_MAX] = {0};
+        key_event_t key_event;
+        num_keys = 0;
+
+        for (int i = 0; i < HID_KEYBOARD_KEY_MAX; i++) {
+            if (prev_keys[i] > HID_KEY_ERROR_UNDEFINED &&
+                !key_found((&param->input.data[i+1]), prev_keys[i], HID_KEYBOARD_KEY_MAX)) {
+                key_event.key_code = prev_keys[i];
+                key_event.modifier = 0;
+                key_event.state = KEY_STATE_RELEASED;
+                key_event_callback(&key_event);
+                key_states[i].key_code = 0;
+                key_states[i].counter = 0;
+                key_states[i].initial_delay_passed = false;
+            }
+
+            if (param->input.data[i+1] > HID_KEY_ERROR_UNDEFINED) {
+                key_states[num_keys].key_code = param->input.data[i+1];
+                key_states[num_keys].counter = 0;
+                key_states[num_keys].initial_delay_passed = false;
+                num_keys++;
+                if (!key_found(prev_keys, param->input.data[i+1], HID_KEYBOARD_KEY_MAX)) {
+                    key_event.key_code = param->input.data[i+1];
+                    key_event.modifier = param->input.data[0];
+                    key_event.state = KEY_STATE_PRESSED;
+                    key_event_callback(&key_event);
+                }
+            }
+        }
+
+        memcpy(prev_keys, &param->input.data[1], HID_KEYBOARD_KEY_MAX);
+
+    /*
         int length_id = param->input.length;
         int mod = param->input.data[0];
         int key = param->input.data[1];
-        unsigned int key_char;
+        unsigned int key_char; */
         //ESP_LOGI(TAG, ESP_BD_ADDR_STR " INPUT: %8s, MAP: %2u, ID: %3u, Len: %d, Data:", ESP_BD_ADDR_HEX(bda), esp_hid_usage_str(param->input.usage), param->input.map_index, param->input.report_id, param->input.length);
         //ESP_LOG_BUFFER_HEX(TAG, param->input.data, param->input.length);
         //printf("Input event\n");
@@ -184,7 +356,7 @@ void hidh_callback(void *handler_args, esp_event_base_t base, int32_t id, void *
             printf(" %d ", param->input.data[i]);
         }*/
         //printf("\n");
-        
+        /*
         if(param->input.data[0] > 0 && param->input.data[1] > 0){
             //printf(" %d :", param->input.data[1]);
             //printf(" %c \n", param->input.data[1]);
@@ -196,10 +368,10 @@ void hidh_callback(void *handler_args, esp_event_base_t base, int32_t id, void *
             key_char = keycode2ascii[param->input.data[1]][0];
             //printf("no mod %d\n", key_char);
             putchar((unsigned int)key_char);
-        }
+        } */
         //printf("")
         //printf("\n");
-        fflush(stdout);
+        //fflush(stdout); 
         break;
     }
     case ESP_HIDH_FEATURE_EVENT: {
@@ -220,6 +392,42 @@ void hidh_callback(void *handler_args, esp_event_base_t base, int32_t id, void *
         break;
     }
 }
+
+
+/**
+ * @brief Handle repeated keys for keyboard
+ */
+static void handle_repeated_keys(void *arg)
+{
+    const TickType_t xInitialDelay = pdMS_TO_TICKS(300);  // Initial delay of 300 ms
+    const TickType_t xRepeatDelay = pdMS_TO_TICKS(50);    // Repeat delay of 50 ms
+
+    while (1) {
+        for (int i = 0; i < num_keys; i++) {
+            if (key_states[i].key_code > HID_KEY_ERROR_UNDEFINED) {
+                if (!key_states[i].initial_delay_passed) {
+                    // Wait for the initial delay before starting repeated key presses
+                    vTaskDelay(xInitialDelay);
+                    key_states[i].initial_delay_passed = true;
+                } else {
+                    key_states[i].counter++;
+                    if (key_states[i].counter >= 5) {  // Adjust the counter threshold as needed
+                        key_event_t key_event;
+                        key_event.key_code = key_states[i].key_code;
+                        key_event.modifier = 0;
+                        key_event.state = KEY_STATE_PRESSED;
+                        key_event_callback(&key_event);
+                        key_states[i].counter = 0;  // Reset counter after printing
+                    }
+                }
+            }
+        }
+        vTaskDelay(xRepeatDelay);
+    }
+}
+
+
+
 
 #define SCAN_DURATION_SECONDS 5
 
@@ -263,14 +471,20 @@ void hid_demo_task(void *pvParameters)
             //open the last result
             esp_hidh_dev_open(cr->bda, cr->transport, cr->ble.addr_type);
         }
+        
         //free the results
         esp_hid_scan_results_free(results);
     }
     vTaskDelete(NULL);
 }
 
+
+
+
+
 void app_main(void)
 {
+    TaskHandle_t repeated_keys_task_handle;
     esp_err_t ret;
 #if HID_HOST_MODE == HIDH_IDLE_MODE
     ESP_LOGE(TAG, "Please turn on BT HID host or BLE!");
@@ -295,4 +509,5 @@ void app_main(void)
     ESP_ERROR_CHECK( esp_hidh_init(&config) );
 
     xTaskCreate(&hid_demo_task, "hid_task", 6 * 1024, NULL, 2, NULL);
+    xTaskCreate(handle_repeated_keys, "repeated_keys", 2048, NULL, 2, &repeated_keys_task_handle);
 }
